@@ -304,9 +304,14 @@ DETRAY_HOST_DEVICE inline void detray::rk_stepper<
                 r_ini + half_h * sd.t[0u] + h2 * 0.125f * sd.dtds[0u];
             vector3_type r_fin = r_ini + h * sd.t[0u] + h2 * 0.5f * sd.dtds[2u];
 
-            matrix_type<3, 3> dBdr_ini = evaluate_field_gradient(r_ini);
-            matrix_type<3, 3> dBdr_mid = evaluate_field_gradient(r_mid);
-            matrix_type<3, 3> dBdr_fin = evaluate_field_gradient(r_fin);
+            // Reuse B-field values already computed in estimate_error()
+            // This reduces B-field lookups from 18 to 9 (50% reduction)
+            matrix_type<3, 3> dBdr_ini =
+                evaluate_field_gradient(r_ini, sd.b_first);
+            matrix_type<3, 3> dBdr_mid =
+                evaluate_field_gradient(r_mid, sd.b_middle);
+            matrix_type<3, 3> dBdr_fin =
+                evaluate_field_gradient(r_fin, sd.b_last);
 
             /*-----------------------------------------------------------------
              * Calculate all terms of dk_n/dr1
@@ -437,35 +442,31 @@ template <typename magnetic_field_t, detray::concepts::algebra algebra_t,
           std::uint32_t flags_v>
 DETRAY_HOST_DEVICE inline auto detray::rk_stepper<
     magnetic_field_t, algebra_t, constraint_t, policy_t, inspector_t,
-    flags_v>::state::evaluate_field_gradient(const point3_type& pos)
+    flags_v>::state::evaluate_field_gradient(const point3_type& pos,
+                                             const vector3_type& b_center)
     -> matrix_type<3, 3> {
 
     auto dBdr = matrix::zero<matrix_type<3, 3>>();
 
     constexpr auto delta{1e-1f * unit<scalar_type>::mm};
+    constexpr auto inv_delta{1.f / (1e-1f * unit<scalar_type>::mm)};
 
+    // Use forward difference: (B(x+h) - B(x)) / h
+    // This requires only 3 B-field lookups instead of 6 for central difference
+    // The caller provides b_center = B(x) which is already computed
     for (unsigned int i = 0; i < 3; i++) {
 
-        point3_type dpos1 = pos;
-        dpos1[i] += delta;
-        const auto bvec1_tmp =
-            this->m_magnetic_field.at(dpos1[0], dpos1[1], dpos1[2]);
-        vector3_type bvec1;
-        bvec1[0u] = bvec1_tmp[0u];
-        bvec1[1u] = bvec1_tmp[1u];
-        bvec1[2u] = bvec1_tmp[2u];
+        point3_type dpos = pos;
+        dpos[i] += delta;
+        const auto bvec_tmp =
+            this->m_magnetic_field.at(dpos[0], dpos[1], dpos[2]);
+        vector3_type bvec;
+        bvec[0u] = bvec_tmp[0u];
+        bvec[1u] = bvec_tmp[1u];
+        bvec[2u] = bvec_tmp[2u];
 
-        point3_type dpos2 = pos;
-        dpos2[i] -= delta;
-        const auto bvec2_tmp =
-            this->m_magnetic_field.at(dpos2[0], dpos2[1], dpos2[2]);
-        vector3_type bvec2;
-        bvec2[0u] = bvec2_tmp[0u];
-        bvec2[1u] = bvec2_tmp[1u];
-        bvec2[2u] = bvec2_tmp[2u];
-
-        assert(delta != 0.f);
-        const vector3_type gradient = (bvec1 - bvec2) * (1.f / (2.f * delta));
+        // Forward difference: (B(x+h) - B(x)) / h
+        const vector3_type gradient = (bvec - b_center) * inv_delta;
 
         getter::element(dBdr, 0u, i) = gradient[0u];
         getter::element(dBdr, 1u, i) = gradient[1u];

@@ -130,8 +130,14 @@ class rk_stepper final
             const scalar_type h, const vector3_type& dtds_prev,
             const scalar_type qop);
 
+        /// @brief Evaluate the magnetic field gradient at a position
+        /// @param pos The position at which to evaluate the gradient
+        /// @param b_center The B-field value at pos (reused to avoid redundant
+        ///                 lookups). Uses forward difference: (B(x+h) - B(x))/h
+        /// @return 3x3 matrix dB/dr
         DETRAY_HOST_DEVICE
-        matrix_type<3, 3> evaluate_field_gradient(const point3_type& pos);
+        matrix_type<3, 3> evaluate_field_gradient(const point3_type& pos,
+                                                  const vector3_type& b_center);
 
         /// Evaluate dtds, where t is the unit tangential direction
         DETRAY_HOST_DEVICE
