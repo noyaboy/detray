@@ -690,6 +690,10 @@ DETRAY_HOST_DEVICE inline bool detray::rk_stepper<
     detray::tie(sd.dtds[0u], sd.t[0u]) = stepping.evaluate_dtds(
         sd.b_first, 0u, 0.f, vector3_type{0.f, 0.f, 0.f}, sd.qop[0u]);
 
+    // B-field caching: detect if field is uniform to skip lookups on retry
+    bool uniform_field = false;
+    bool first_estimate = true;
+
     /// RKN step trial and error estimation
     const auto estimate_error = [&](const scalar_type& h) {
         assert(h != 0);
@@ -702,16 +706,24 @@ DETRAY_HOST_DEVICE inline bool detray::rk_stepper<
         // Eq (84) of https://doi.org/10.1016/0029-554X(81)90063-X
         const point3_type pos1 =
             pos + half_h * sd.t[0u] + h2 * 0.125f * sd.dtds[0u];
-        bvec = magnetic_field.at(pos1[0], pos1[1], pos1[2]);
-        assert(math::isfinite(bvec[0]));
-        assert(math::isfinite(bvec[1]));
-        assert(math::isfinite(bvec[2]));
-        sd.b_middle[0] = bvec[0];
-        sd.b_middle[1] = bvec[1];
-        sd.b_middle[2] = bvec[2];
+
+        // B-field caching: skip lookup if field is uniform (detected on first
+        // call)
+        if (!uniform_field) {
+            bvec = magnetic_field.at(pos1[0], pos1[1], pos1[2]);
+            assert(math::isfinite(bvec[0]));
+            assert(math::isfinite(bvec[1]));
+            assert(math::isfinite(bvec[2]));
+            sd.b_middle[0] = bvec[0];
+            sd.b_middle[1] = bvec[1];
+            sd.b_middle[2] = bvec[2];
+        } else {
+            // Uniform field: reuse b_first
+            sd.b_middle = sd.b_first;
+        }
         DETRAY_DEBUG_HOST_DEVICE("Second stage:");
-        DETRAY_DEBUG_HOST_DEVICE("-> B-field: [%f, %f, %f]", bvec[0], bvec[1],
-                                 bvec[2]);
+        DETRAY_DEBUG_HOST_DEVICE("-> B-field: [%f, %f, %f]", sd.b_middle[0],
+                                 sd.b_middle[1], sd.b_middle[2]);
 
         detray::tie(sd.dqopds[1u], sd.qop[1u]) = stepping.evaluate_dqopds(
             1u, half_h, sd.dqopds[0u], vol_mat_ptr, cfg);
@@ -730,22 +742,44 @@ DETRAY_HOST_DEVICE inline bool detray::rk_stepper<
         // qop should be recalcuated at every point
         // Eq (84) of https://doi.org/10.1016/0029-554X(81)90063-X
         const point3_type pos2 = pos + h * sd.t[0u] + h2 * 0.5f * sd.dtds[2u];
-        bvec = magnetic_field.at(pos2[0], pos2[1], pos2[2]);
-        assert(math::isfinite(bvec[0]));
-        assert(math::isfinite(bvec[1]));
-        assert(math::isfinite(bvec[2]));
-        sd.b_last[0] = bvec[0];
-        sd.b_last[1] = bvec[1];
-        sd.b_last[2] = bvec[2];
+
+        // B-field caching: skip lookup if field is uniform
+        if (!uniform_field) {
+            bvec = magnetic_field.at(pos2[0], pos2[1], pos2[2]);
+            assert(math::isfinite(bvec[0]));
+            assert(math::isfinite(bvec[1]));
+            assert(math::isfinite(bvec[2]));
+            sd.b_last[0] = bvec[0];
+            sd.b_last[1] = bvec[1];
+            sd.b_last[2] = bvec[2];
+        } else {
+            // Uniform field: reuse b_first
+            sd.b_last = sd.b_first;
+        }
 
         DETRAY_DEBUG_HOST_DEVICE("Third stage:");
-        DETRAY_DEBUG_HOST_DEVICE("-> B-field: [%f, %f, %f]", bvec[0], bvec[1],
-                                 bvec[2]);
+        DETRAY_DEBUG_HOST_DEVICE("-> B-field: [%f, %f, %f]", sd.b_last[0],
+                                 sd.b_last[1], sd.b_last[2]);
 
         detray::tie(sd.dqopds[3u], sd.qop[3u]) =
             stepping.evaluate_dqopds(3u, h, sd.dqopds[2u], vol_mat_ptr, cfg);
         detray::tie(sd.dtds[3u], sd.t[3u]) =
             stepping.evaluate_dtds(sd.b_last, 3u, h, sd.dtds[2u], sd.qop[3u]);
+
+        // After first call, detect if B-field is uniform in this step region
+        // If uniform, skip B-field lookups on subsequent retry iterations
+        if (first_estimate) {
+            // Use relative tolerance based on field magnitude
+            constexpr scalar_type rel_tol = 1e-4f;   // 0.01% relative
+            constexpr scalar_type abs_tol = 1e-10f;  // absolute for ~zero field
+            const scalar_type b_mag = vector::norm(sd.b_first);
+            const scalar_type tol = rel_tol * b_mag + abs_tol;
+
+            const scalar_type diff_mid = vector::norm(sd.b_first - sd.b_middle);
+            const scalar_type diff_last = vector::norm(sd.b_middle - sd.b_last);
+            uniform_field = (diff_mid < tol) && (diff_last < tol);
+            first_estimate = false;
+        }
 
         // Compute and check the local integration error estimate
         // @Todo
