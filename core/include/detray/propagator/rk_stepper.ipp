@@ -737,6 +737,32 @@ DETRAY_HOST_DEVICE inline bool detray::rk_stepper<
     detray::tie(sd.dtds[0u], sd.t[0u]) = stepping.evaluate_dtds(
         sd.b_first, 0u, 0.f, vector3_type{0.f, 0.f, 0.f}, sd.qop[0u]);
 
+    // Curvature-based initial step size optimization:
+    // Estimate optimal step size based on B-field and qop to reduce retries.
+    // RK4 error scales as h^4 * curvature, so h_opt ~ (tol / curvature)^0.25
+    if (do_reset) {
+        const scalar_type b_mag = vector::norm(sd.b_first);
+        const scalar_type curvature = math::fabs(sd.qop[0u]) * b_mag;
+
+        // Only apply if curvature is significant (avoid div by ~zero)
+        if (curvature > static_cast<scalar_type>(1e-10)) {
+            // Conservative estimate with safety factor 0.9
+            // h ~ (tol / curvature)^0.25
+            const scalar_type h_estimate = static_cast<scalar_type>(0.9) *
+                math::pow(cfg.rk_error_tol / curvature,
+                          static_cast<scalar_type>(0.25));
+
+            // Cap step size if our estimate is smaller than current
+            if (h_estimate < math::fabs(stepping.step_size())) {
+                stepping.set_step_size(
+                    math::copysign(h_estimate, stepping.step_size()));
+
+                DETRAY_VERBOSE_HOST_DEVICE(
+                    "Curvature-adjusted stepsize: %f mm", stepping.step_size());
+            }
+        }
+    }
+
     // B-field caching: detect if field is uniform to skip lookups on retry
     bool uniform_field = false;
     bool first_estimate = true;
