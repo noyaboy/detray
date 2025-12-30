@@ -69,6 +69,9 @@ class rk_stepper final
         darray<vector3_type, 4u> dtds;
         // d(q/p)/ds
         darray<scalar_type, 4u> dqopds;
+        // Flag indicating B-field is uniform (b_first == b_middle == b_last)
+        // Used to optimize Jacobian transport by reusing skew-symmetric matrix
+        bool uniform_field{false};
     };
 
     struct state : public base_type::state {

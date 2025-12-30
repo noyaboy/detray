@@ -262,24 +262,71 @@ DETRAY_HOST_DEVICE inline void detray::rk_stepper<
         const auto I33 = matrix::identity<matrix_type<3, 3>>();
         darray<matrix_type<3u, 3u>, 4u> dkndt{I33, I33, I33, I33};
 
-        // dk1/dt1
-        dkndt[0u] =
-            sd.qop[0u] * mat_helper().column_wise_cross(dkndt[0u], sd.b_first);
+        // Uniform field optimization: precompute skew matrix for cross product
+        // column_wise_cross(M, b) = skew(-b) * M
+        // When field is uniform, all stages use the same b vector
+        if (sd.uniform_field) {
+            // Precompute skew(-b) matrix components
+            // skew(-b) = [0, bz, -by; -bz, 0, bx; by, -bx, 0]
+            const scalar_type bx = sd.b_first[0];
+            const scalar_type by = sd.b_first[1];
+            const scalar_type bz = sd.b_first[2];
 
-        // dk2/dt1
-        dkndt[1u] = dkndt[1u] + half_h * dkndt[0u];
-        dkndt[1u] =
-            sd.qop[1u] * mat_helper().column_wise_cross(dkndt[1u], sd.b_middle);
+            // Helper lambda: applies skew(-b) * M inline
+            // This is equivalent to column_wise_cross(M, b)
+            const auto apply_skew_cross =
+                [bx, by, bz](const matrix_type<3, 3>& m) -> matrix_type<3, 3> {
+                matrix_type<3, 3> result;
+                // skew(-b) * M: each element (i,j) = sum_k skew(-b)_ik * M_kj
+                // Row 0: [0, bz, -by] dot column j
+                // Row 1: [-bz, 0, bx] dot column j
+                // Row 2: [by, -bx, 0] dot column j
+                for (unsigned int j = 0u; j < 3u; ++j) {
+                    const scalar_type m0j = getter::element(m, 0u, j);
+                    const scalar_type m1j = getter::element(m, 1u, j);
+                    const scalar_type m2j = getter::element(m, 2u, j);
+                    getter::element(result, 0u, j) = bz * m1j - by * m2j;
+                    getter::element(result, 1u, j) = bx * m2j - bz * m0j;
+                    getter::element(result, 2u, j) = by * m0j - bx * m1j;
+                }
+                return result;
+            };
 
-        // dk3/dt1
-        dkndt[2u] = dkndt[2u] + half_h * dkndt[1u];
-        dkndt[2u] =
-            sd.qop[2u] * mat_helper().column_wise_cross(dkndt[2u], sd.b_middle);
+            // dk1/dt1
+            dkndt[0u] = sd.qop[0u] * apply_skew_cross(dkndt[0u]);
 
-        // dk4/dt1
-        dkndt[3u] = dkndt[3u] + h * dkndt[2u];
-        dkndt[3u] =
-            sd.qop[3u] * mat_helper().column_wise_cross(dkndt[3u], sd.b_last);
+            // dk2/dt1
+            dkndt[1u] = dkndt[1u] + half_h * dkndt[0u];
+            dkndt[1u] = sd.qop[1u] * apply_skew_cross(dkndt[1u]);
+
+            // dk3/dt1
+            dkndt[2u] = dkndt[2u] + half_h * dkndt[1u];
+            dkndt[2u] = sd.qop[2u] * apply_skew_cross(dkndt[2u]);
+
+            // dk4/dt1
+            dkndt[3u] = dkndt[3u] + h * dkndt[2u];
+            dkndt[3u] = sd.qop[3u] * apply_skew_cross(dkndt[3u]);
+        } else {
+            // Non-uniform field: use standard column_wise_cross
+            // dk1/dt1
+            dkndt[0u] = sd.qop[0u] *
+                        mat_helper().column_wise_cross(dkndt[0u], sd.b_first);
+
+            // dk2/dt1
+            dkndt[1u] = dkndt[1u] + half_h * dkndt[0u];
+            dkndt[1u] = sd.qop[1u] *
+                        mat_helper().column_wise_cross(dkndt[1u], sd.b_middle);
+
+            // dk3/dt1
+            dkndt[2u] = dkndt[2u] + half_h * dkndt[1u];
+            dkndt[2u] = sd.qop[2u] *
+                        mat_helper().column_wise_cross(dkndt[2u], sd.b_middle);
+
+            // dk4/dt1
+            dkndt[3u] = dkndt[3u] + h * dkndt[2u];
+            dkndt[3u] = sd.qop[3u] *
+                        mat_helper().column_wise_cross(dkndt[3u], sd.b_last);
+        }
 
         dFdt = dFdt + h_6 * (dkndt[0u] + dkndt[1u] + dkndt[2u]);
         dFdt = h * dFdt;
@@ -877,6 +924,9 @@ DETRAY_HOST_DEVICE inline bool detray::rk_stepper<
     // Advance track state
     stepping.advance_track(sd, vol_mat_ptr);
     assert(!stepping().is_invalid());
+
+    // Pass uniform field flag to Jacobian transport for optimization
+    sd.uniform_field = uniform_field;
 
     // Advance jacobian transport
     if constexpr (flags_v &
