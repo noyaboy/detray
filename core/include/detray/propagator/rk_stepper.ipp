@@ -873,12 +873,13 @@ DETRAY_HOST_DEVICE inline bool detray::rk_stepper<
         // Error estimate is too big
         // ---> Make step size smaller and estimate error again
         else {
-            stepping.set_step_size(stepping.step_size() *
-                                   step_size_scaling(error));
+            // Cache scaling factor to avoid redundant computation
+            const scalar_type scale = step_size_scaling(error);
+            stepping.set_step_size(stepping.step_size() * scale);
 
             // Run inspection while the stepsize is getting adjusted
             stepping.run_inspector(cfg, "Adjust stepsize: ", dist_to_next, i,
-                                   step_size_scaling(error));
+                                   scale);
         }
     }
 
